@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <script src="jquery.min.js"></script>
   <style>
     html, body {
       margin: 0;
@@ -19,6 +18,7 @@
       left: 50%;
       top: 50%;
       transform: translate(-50%, -50%);
+      overflow: hidden;
     }
 
     .prototype-container ::-webkit-scrollbar {
@@ -32,14 +32,13 @@
       right: 0;
       bottom: 0;
       opacity: 0;
-      display: none;
+      display: block;
       box-shadow: 0 0 0 1px rgba(0, 0, 0, .12);
       overflow: hidden;
     }
 
-    .artboard.is-active {
-      opacity: 1;
-      display: block;
+    .artboard:not(.is-active) {
+      pointer-events: none;
     }
 
     .artboard-scroll-container,
@@ -77,6 +76,7 @@
       box-shadow:
           0 0 0 3px rgba(239, 108, 0, .5) inset,
           0 4px 8px rgba(239, 108, 0, .25);
+      border-radius: 1px;
     }
 
     .highlight-hotspots .hotspot {
@@ -102,10 +102,104 @@
   </div>
 
   <script>
+    class Spring {
+      constructor(_damping, response, initial) {
+        let force = (2 * Math.PI / response) ** 2;
+        let damping = _damping * (2 * Math.sqrt(force));
+        this._constructor(force, damping, initial);
+      }
+      setDampingResponse(_damping, response) {
+        this.force = (2 * Math.PI / response) ** 2;
+        this.damping = _damping * (2 * Math.sqrt(this.force));
+      }
+      _constructor(force, damping, initial = 0) {
+        this.force = force;
+        this.damping = damping;
+        this.value = initial;
+        this.target = initial;
+        this.velocity = 0;
+        this.tolerance = 1 / 100;
+        this.callback = () => {};
+        this.running = false;
+      }
+      update(elapsed) {
+        let timeLeft = Math.min(elapsed, 1);
+        while (timeLeft > 0) {
+            let dt = Math.min(1 / 60, timeLeft);
+            let force = this.currentForce();
+            this.value += this.velocity * dt;
+            this.velocity += force * dt;
+            timeLeft -= dt;
+        }
+      }
+      currentForce() {
+        if (this.target === null) {
+            return -this.damping * this.velocity;
+        }
+        return -this.force * (this.value - this.target) - this.damping * this.velocity;
+      }
+      needsUpdate(tolerance) {
+        return Math.abs(this.value - this.target) > tolerance || Math.abs(this.velocity) > tolerance;
+      }
+      run() {
+        if (this.running) return;
+        this._runID = Math.random();
+        this.lastTime = Date.now();
+        this.runLoop(this._runID);
+      }
+      runLoop(id) {
+        if (id !== this._runID) return;
+        if (this.needsUpdate(this.tolerance)) {
+            requestAnimationFrame(() => this.runLoop(id));
+            this.running = true;
+        } else {
+            this.value = this.target;
+            this.callback(this.value);
+            this.running = false;
+            return;
+        }
+        let elapsed = (Date.now() - this.lastTime) / 1000;
+        this.lastTime = Date.now();
+        this.update(elapsed);
+        this.callback(this.value);
+      }
+      static run(damping, response, initial, target, f, tol, vel) {
+        let s = new Spring(damping, response, initial);
+        s.target = target;
+        s.callback = f;
+        if (tol) s.tolerance = tol;
+        if (vel) s.velocity = vel;
+        s.run();
+        return s;
+      }
+    }
+
+    const AnimationType = {
+      none: -1,
+      slideFromRight: 0,
+      slideFromLeft: 1,
+      slideFromBottom: 2,
+      slideFromTop: 3,
+      getDeltaForType (type) {
+        switch (type) {
+        case AnimationType.none:
+          return [0, 0];
+        case AnimationType.slideFromLeft:
+          return [-1, 0];
+        case AnimationType.slideFromRight:
+          return [1, 0];
+        case AnimationType.slideFromTop:
+          return [0, -1];
+        case AnimationType.slideFromBottom:
+          return [0, 1];
+        }
+      }
+    };
 
     class Proto {
       constructor(prototypeData) {
         this.prototypeData = prototypeData;
+        this.historyStack = [];
         this.buildUi();
       }
 
@@ -113,88 +207,93 @@
         this.buildArtboards();
 
         if (this.prototypeData.title) {
-          document.title = this.prototypeData.title;
+            document.title = this.prototypeData.title;
         }
 
-        $(window).on('hashchange', () => {
-          this.setArtboardVisible(this.getUrlInfo().artboardId);
+        window.addEventListener('hashchange', () => {
+            // this.setArtboardVisible(this.getUrlInfo().artboardId);
         });
 
-        $(document).click(() => {
-          if (this.shouldSuppressHotspotReveal_) {
-            return;
-          }
+        document.addEventListener('click', () => {
+            if (this.shouldSuppressHotspotReveal_) {
+                return;
+            }
 
-          $(document.body).removeClass('highlight-hotspots');
-          let f = document.body.offsetWidth;
-          $(document.body).addClass('highlight-hotspots');
+            document.body.classList.remove('highlight-hotspots');
+            let f = document.body.offsetWidth;
+            document.body.classList.add('highlight-hotspots');
         });
 
-        $(window).on('resize', () => this.resize());
+        window.addEventListener('resize', () => this.resize());
 
         this.setArtboardVisible(this.getUrlInfo().artboardId);
+
+        this.historyStack.push({
+            artboard: document.querySelector('.artboard.is-active'),
+            animationType: AnimationType.none,
+        });
+        this.setArtboardStyle(this.historyStack[0].artboard, 1, 0, 0);
       }
 
       resize() {
         let width = this.startArtboard.viewportWidth || this.startArtboard.width;
         let height = this.startArtboard.viewportHeight || this.startArtboard.height;
         if (this.currentArtboard.viewportWidth && this.currentArtboard.viewportHeight) {
-          width = this.currentArtboard.viewportWidth;
-          height = this.currentArtboard.viewportHeight;
+            width = this.currentArtboard.viewportWidth;
+            height = this.currentArtboard.viewportHeight;
         }
 
         let xScale = window.innerHeight / height;
         let yScale = window.innerWidth / width;
-        $('.prototype-container')
-            .css({
-              width: width,
-              height: height,
-              zoom: Math.min(1, Math.min(xScale, yScale)),
-            });
+        Object.assign(document.querySelector('.prototype-container').style, {
+            width: width + 'px',
+            height: height + 'px',
+            zoom: Math.min(1, Math.min(xScale, yScale)),
+        });
       }
 
       getUrlInfo() {
         let hash = window.location.hash;
 
         return {
-          artboardId: hash ? hash.substring(1) : this.prototypeData.flowStartArtboardId,
+            artboardId: hash ? hash.substring(1) : this.prototypeData.flowStartArtboardId,
         };
       }
 
       buildArtboards() {
         Object.keys(this.prototypeData.artboards).forEach(id => {
           let artboardData = this.prototypeData.artboards[id];
-          let $artboard = $('<div>')
-              .addClass('artboard')
-              .attr('data-artboard-id', id)
-              .appendTo('.prototype-container');
+          let artboard = document.createElement('div');
+          artboard.className = 'artboard';
+          artboard.dataset.artboardId = id;
+          document.querySelector('.prototype-container').appendChild(artboard);
 
           // add scrollable content
-          let $artboardScrollContainer = $('<div>')
-              .addClass('artboard-scroll-container')
-              .appendTo($artboard);
-          let $artboardScrollableContent = $('<div>')
-              .addClass('artboard-content')
-              .css({
-                backgroundImage: `url(${id}.png)`,
-                width: artboardData.width,
-                height: artboardData.height,
-              })
-              .appendTo($artboardScrollContainer);
+          let artboardScrollContainer = document.createElement('div');
+          artboardScrollContainer.className = 'artboard-scroll-container';
+          artboard.appendChild(artboardScrollContainer);
+          let artboardScrollableContent = document.createElement('div');
+          artboardScrollableContent.className = 'artboard-content';
+          Object.assign(artboardScrollableContent.style, {
+            backgroundImage: `url(${id}.png)`,
+            width: artboardData.width + 'px',
+            height: artboardData.height + 'px',
+          });
+          artboardScrollContainer.appendChild(artboardScrollableContent);
 
           // add fixed content
           if (artboardData.hasFixedLayers) {
-            let $artboardFixedContainer = $('<div>')
-                .addClass('artboard-fixed-container')
-                .appendTo($artboard);
-            let $artboardFixedContent = $('<div>')
-                .addClass('artboard-content')
-                .css({
-                  backgroundImage: `url(${id}_fixed.png)`,
-                  width: artboardData.width,
-                  height: artboardData.height,
-                })
-                .appendTo($artboardFixedContainer);
+            let artboardFixedContainer = document.createElement('div');
+            artboardFixedContainer.className = 'artboard-fixed-container';
+            artboard.append(artboardFixedContainer);
+            let artboardFixedContent = document.createElement('div');
+            artboardFixedContent.className = 'artboard-content';
+            Object.assign(artboardFixedContent.style, {
+              backgroundImage: `url(${id}_fixed.png)`,
+              width: artboardData.width + 'px',
+              height: artboardData.height + 'px',
+            });
+            artboardFixedContainer.appendChild(artboardFixedContent);
           }
 
           if (id == this.prototypeData.flowStartArtboardId) {
@@ -204,52 +303,104 @@
           }
 
           artboardData.hotspots.forEach(hotspotData => {
-            let $hotspot = $('<div>')
-              .addClass('hotspot')
-              .attr('data-artboard-id', id)
-              .css({
-                left: hotspotData.rectangle.x,
-                top: hotspotData.rectangle.y,
-                width: hotspotData.rectangle.width,
-                height: hotspotData.rectangle.height,
-              })
-              .appendTo(hotspotData.isFixed
-                  ? $artboard // don't add to $artboardFixedContent because of pointer-events:none
-                  : $artboardScrollableContent);
-            $hotspot.click(event => {
-              this.gotoTarget(hotspotData.target)
+            let hotspot = document.createElement('div');
+            hotspot.className = 'hotspot';
+            hotspot.dataset.artboardId = id;
+            Object.assign(hotspot.style, {
+              left: hotspotData.rectangle.x + 'px',
+              top: hotspotData.rectangle.y + 'px',
+              width: hotspotData.rectangle.width + 'px',
+              height: hotspotData.rectangle.height + 'px',
+            });
+            if (hotspotData.isFixed) {
+              // don't add to artboardFixedContent because of pointer-events:none
+              artboard.appendChild(hotspot);
+            } else {
+              artboardScrollableContent.appendChild(hotspot);
+            }
+            hotspot.addEventListener('click', event => {
+              this.gotoTarget(hotspotData.target, hotspotData.animationType)
               event.stopPropagation();
             });
           });
         });
       }
 
-      gotoTarget(target) {
+      gotoTarget(target, animationType) {
         if (target == 'back') {
-          history.back();
+          // history.back();
+          this.goBack();
           return;
         }
 
-        this.gotoArtboard(target);
+        this.gotoArtboard(target, animationType);
       }
 
-      gotoArtboard(artboardId) {
-        window.location.href= '#' + artboardId;
+      setArtboardStyle(artboard, opacity, dx, dy) {
+        Object.assign(artboard.style, {
+          opacity,
+          transform: `translate(${dx * 100}%, ${dy * 100}%)`
+        });
+      }
+
+      goBack() {
+        if (this.historyStack.length === 1) return;
+        let { artboard, animationType } = this.historyStack.pop();
+        let prevArtboard = this.historyStack[this.historyStack.length - 1].artboard;
+
+        prevArtboard.classList.add('is-active');
+        artboard.classList.remove('is-active');
+        this.resize();
+
+        if (animationType === AnimationType.none) {
+          this.setArtboardStyle(prevArtboard, 1, 0, 0);
+          this.setArtboardStyle(artboard, 0, 0, 0);
+        } else {
+          Spring.run(1, 0.4, 0, 1, p => {
+              let [dx, dy] = AnimationType.getDeltaForType(animationType);
+              this.setArtboardStyle(artboard, 1, dx * p, dy * p);
+              this.setArtboardStyle(prevArtboard, 1, -dx * (1 - p) / 2, -dy * (1 - p) / 2);
+          }, 1 / 1000);
+        }
+      }
+
+      gotoArtboard(artboardId, animationType) {
+        // window.location.href= '#' + artboardId;
+
+        let prevArtboard = this.historyStack[this.historyStack.length - 1].artboard;
+        let artboard = document.querySelector(`.artboard[data-artboard-id="${artboardId}"]`);
+
+        prevArtboard.classList.remove('is-active');
+        artboard.classList.add('is-active');
+        this.resize();
+
+        this.historyStack.push({ artboard, animationType });
+
+        if (animationType === AnimationType.none) {
+          this.setArtboardStyle(prevArtboard, 0, 0, 0);
+          this.setArtboardStyle(artboard, 1, 0, 0);
+        } else {
+          Spring.run(1, 0.4, 1, 0, p => {
+              let [dx, dy] = AnimationType.getDeltaForType(animationType);
+              this.setArtboardStyle(artboard, 1, dx * p, dy * p);
+              this.setArtboardStyle(prevArtboard, 1, -dx * (1 - p) / 2, -dy * (1 - p) / 2);
+          }, 1 / 1000);
+        }
       }
 
       setArtboardVisible(artboardId) {
         this.currentArtboard = this.prototypeData.artboards[artboardId];
 
-        $('.artboard-scroll-container').scrollLeft(0).scrollTop(0);
+        let scrollContainer = document.querySelector('.artboard-scroll-container');
+        scrollContainer.scrollLeft = scrollContainer.scrollTop = 0;
 
-        $(document.body).removeClass('highlight-hotspots');
-        $('.artboard').removeClass('is-active');
-        $(`.artboard[data-artboard-id="${artboardId}"]`).addClass('is-active');
+        document.body.classList.remove('highlight-hotspots');
+        document.querySelectorAll('.artboard').forEach(artboard => artboard.classList.remove('is-active'));
+        document.querySelector(`.artboard[data-artboard-id="${artboardId}"]`).classList.add('is-active');
 
         this.resize();
       }
     }
-
   </script>
   <script>
     new Proto(

@@ -206,7 +206,8 @@ export default function(context) {
             artboardsToProcess.push(target);
           }
 
-          artboardData.hotspots.push({rectangle, target, isFixed});
+          let animationType = nativeFlow.animationType();
+          artboardData.hotspots.push({rectangle, target, isFixed, animationType});
         }
       }
 
@@ -243,10 +244,6 @@ export default function(context) {
 
   let htmlPath = `${rootPath}/index.html`;
   fs.writeFileSync(htmlPath, makeIndexHtml(context, prototypeData));
-
-  ['jquery.min.js'].forEach(addlFile => {
-    fs.copyFileSync(context.plugin.urlForResourceNamed(addlFile).path(), `${rootPath}/${addlFile}`);
-  });
 
   NSWorkspace.sharedWorkspace().openFile(htmlPath);
   UI.message('✅ Exported!');
